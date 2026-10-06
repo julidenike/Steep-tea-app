@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#f7f0e5">
-<title>Steep v4</title>  
+<title>Steep v4.1</title>
 <style>
 :root{--bg:#f7f0e5;--card:#fffaf1;--brown:#73523f;--text:#443830;--muted:#8e8177;--sage:#dfe8d8;--peach:#f3d0bf;--line:#ded3c4}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
@@ -13,7 +13,7 @@
 .card{background:var(--card);border:2px solid var(--line);border-radius:38px;padding:30px;margin-top:30px}.card h2,.shelf-title{font:700 42px Georgia,serif;color:var(--brown);margin:0 0 22px}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:14px}.toggleline{grid-column:1/-1;display:flex;gap:12px;align-items:center;font-weight:650;font-size:20px}.toggleline input{width:34px;height:34px}
 .segment{grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 5px}.seg{border:0;border-radius:24px;background:var(--sage);padding:11px 15px;font-size:16px;color:var(--brown);font-weight:650}.seg.active{background:var(--brown);color:white}
-button{font:inherit}.action{border:0;border-radius:24px;padding:20px 10px;font-size:18px;font-weight:700;color:var(--brown);background:var(--sage)}.action.primary{background:var(--brown);color:white}.action.peach{background:var(--peach)}
+button{font:inherit}.action{border:0;border-radius:24px;padding:20px 10px;font-size:18px;font-weight:700;color:var(--brown);background:var(--sage)}.action.primary{background:var(--brown);color:white}.action.peach{background:var(--peach)}.action.selected{background:var(--brown);color:white;box-shadow:0 0 0 3px #eaded0 inset}
 .rec h3,.tea h3{font:700 40px Georgia,serif;color:var(--brown);margin:8px 0}.eyebrow{color:var(--muted);font-size:18px}.brand{font-size:25px}.chips{display:flex;gap:8px;flex-wrap:wrap;margin:15px 0}.chip{background:var(--sage);padding:9px 14px;border-radius:22px}.chip.peach{background:var(--peach)}.note{font-size:20px;margin:14px 0}.row{display:flex;gap:10px;flex-wrap:wrap}.smallbtn{border:0;border-radius:22px;padding:15px 18px;font-weight:700;background:var(--sage);color:var(--brown)}.smallbtn.dark{background:var(--brown);color:white}
 .searchrow{display:grid;grid-template-columns:2fr 1fr;gap:10px}.field,select,textarea,input[type=text]{width:100%;font-size:20px;padding:15px;border:2px solid var(--line);border-radius:20px;background:white}.tea{padding:18px 0;border-bottom:2px solid var(--line)}.tea h3{font-size:29px;margin:0}.meta{color:var(--muted);font-size:18px}
 .nav{position:fixed;bottom:0;left:0;right:0;background:rgba(255,250,241,.96);border-top:2px solid var(--line);display:flex;justify-content:center;padding:14px max(18px,env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom));gap:8px}.nav button{width:min(31%,230px);border:0;border-radius:24px;padding:17px 5px;background:transparent;color:var(--brown);font-weight:700}.nav button.active{background:var(--sage)}
@@ -140,6 +140,9 @@ logs=logs.map(l=>{
 function save(){localStorage.setItem(V4KEY,JSON.stringify(teas));localStorage.setItem(LOGKEY,JSON.stringify(logs))}
 
 let caffeine="Any", lastPicks={}, pendingLog=null;
+// Session-only recommendation memory: prevents the same small handful of teas from cycling.
+const pickHistory={best:[],different:[],useup:[],wild:[]};
+const recommendationHistory=[];
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 function onShelf(){return teas.filter(t=>t.amount!=="Finished")}
@@ -154,15 +157,71 @@ function eligible(){
 }
 function lastLog(t){return logs.filter(x=>x.teaId===t.id||norm(x.name)===norm(t.name)).sort((a,b)=>new Date(b.time)-new Date(a.time))[0]}
 function daysSince(t){let l=lastLog(t);return l?Math.floor((Date.now()-new Date(l.time))/86400000):999}
+function markMode(mode){
+ $$('[data-mode]').forEach(b=>b.classList.toggle("selected",b.dataset.mode===mode));
+}
+function unseenFor(mode,pool){
+ const ids=new Set(pool.map(t=>t.id));
+ pickHistory[mode]=pickHistory[mode].filter(id=>ids.has(id));
+ let seen=new Set(pickHistory[mode]);
+ let fresh=pool.filter(t=>!seen.has(t.id));
+ if(!fresh.length){pickHistory[mode]=[];fresh=pool.slice()}
+ return fresh;
+}
+function rememberPick(mode,t){
+ pickHistory[mode].push(t.id);
+ lastPicks[mode]=t.id;
+ recommendationHistory.push({id:t.id,mode,location:t.location||""});
+ if(recommendationHistory.length>30)recommendationHistory.shift();
+}
+function weightedPick(pool,weightFn){
+ const weights=pool.map(t=>Math.max(.1,weightFn(t))),total=weights.reduce((a,b)=>a+b,0);
+ let r=Math.random()*total;
+ for(let i=0;i<pool.length;i++){r-=weights[i];if(r<=0)return pool[i]}
+ return pool[pool.length-1];
+}
 function choose(mode){
+ markMode(mode);
  let x=eligible();if(!x.length)return showNone();
- const shown=new Set(Object.values(lastPicks));
- let pool=x.filter(t=>!shown.has(t.id));if(!pool.length)pool=x;
- if(mode==="useup"){let u=pool.filter(t=>/use up/i.test(t.status));if(!u.length)return $("#recommendation").innerHTML=`<div class=card><div class=note>No Use Up teas match those filters.</div></div>`;pool=u}
- if(mode==="different"){let best=lastPicks.best;pool=pool.filter(t=>t.id!==best);pool.sort((a,b)=>daysSince(b)-daysSince(a));pool=pool.slice(0,Math.max(1,Math.ceil(pool.length/3)))}
- if(mode==="best"){pool.sort((a,b)=>score(b)-score(a));pool=pool.slice(0,Math.min(4,pool.length))}
- let t=mode==="wild"?pool[Math.floor(Math.random()*pool.length)]:pool[Math.floor(Math.random()*Math.min(pool.length,mode==="best"?2:pool.length))];
- lastPicks[mode]=t.id; showRec(t,mode)
+ let pool=x.slice();
+
+ if(mode==="useup"){
+   pool=pool.filter(t=>/use up/i.test(t.status));
+   if(!pool.length)return $("#recommendation").innerHTML=`<div class=card><div class=note>No Use Up teas match those filters.</div></div>`;
+   pool=unseenFor(mode,pool);
+   let t=pool[Math.floor(Math.random()*pool.length)];rememberPick(mode,t);return showRec(t,mode);
+ }
+
+ if(mode==="wild"){
+   pool=unseenFor(mode,pool);
+   let t=pool[Math.floor(Math.random()*pool.length)];rememberPick(mode,t);return showRec(t,mode);
+ }
+
+ if(mode==="different"){
+   const recentIds=new Set(recommendationHistory.slice(-8).map(r=>r.id));
+   let fresh=pool.filter(t=>!recentIds.has(t.id));if(fresh.length)pool=fresh;
+   pool=unseenFor(mode,pool);
+   const recentLocs=recommendationHistory.slice(-5).map(r=>r.location);
+   const drawerHeavy=recentLocs.filter(l=>/drawer/i.test(l)).length>=3;
+   let t=weightedPick(pool,t=>{
+     let w=1+Math.min(daysSince(t),90)/18;
+     if(/cabinet/i.test(t.location))w+=drawerHeavy?7:3;
+     if(/forgotten/i.test(t.status))w+=4;
+     if(t.preference==="Favorite")w*=.75; // "different" should reach beyond usual favorites.
+     return w;
+   });
+   rememberPick(mode,t);return showRec(t,mode);
+ }
+
+ // Best Pick: rank the whole eligible shelf, then choose among a meaningful group of strong fits.
+ // This keeps quality high without reducing 79 teas to an A/B loop.
+ pool.sort((a,b)=>score(b)-score(a));
+ const cutoff=Math.min(12,pool.length);
+ pool=pool.slice(0,cutoff);
+ pool=unseenFor(mode,pool);
+ const maxScore=Math.max(...pool.map(score));
+ let t=weightedPick(pool,t=>Math.max(1,10-(maxScore-score(t))*1.6));
+ rememberPick(mode,t);showRec(t,mode);
 }
 function score(t){let s=0;if(t.preference==="Favorite")s+=6;if($("#cranky").checked){if(t.gentle==="Go-To")s+=14;if(t.gentle==="Gentle")s+=9;if(t.gentle==="Maybe")s+=2}if(/finish soon|forgotten/i.test(t.status))s+=2;s+=Math.min(daysSince(t),45)/10;return s}
 function showNone(){$("#recommendation").innerHTML=`<div class=card><div class=note>No teas match all those filters. Try loosening one.</div></div>`}
